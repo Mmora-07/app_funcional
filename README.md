@@ -1,2 +1,2 @@
-# app_funcional
-aplicacion de riesgo crediticio
+# app-de-riesgo
+

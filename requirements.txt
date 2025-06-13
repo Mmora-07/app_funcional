@@ -1,0 +1,14 @@
+# Framework para la aplicación web
+streamlit
+
+# Manipulación y análisis de datos
+pandas
+numpy
+
+# Machine Learning y utilidades
+scikit-learn
+joblib
+
+# --- Dependencia Clave para la Red Neuronal ---
+# Biblioteca de Deep Learning de PyTorch
+torch
