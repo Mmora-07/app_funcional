@@ -38,8 +38,6 @@ class RiskNN(nn.Module):
         self.net = nn.Sequential(*layer_list)
 
     def forward(self, x_num, x_cat):
-        # El error de índice ocurre aquí si los índices en x_cat
-        # son mayores que los `cat_dims` con los que se entrenó el modelo.
         emb = [m(x_cat[:, i]) for i, m in enumerate(self.emb)]
         x = torch.cat(emb + [x_num], dim=1)
         return self.net(x).squeeze(1)
@@ -92,7 +90,7 @@ except Exception as e:
     st.error(f"Error al cargar el modelo: {e}")
     st.stop()
 
-# --- 5. FORMULARIO DE ENTRADA (CON OPCIONES COMPLETAS) ---
+# --- 5. FORMULARIO DE ENTRADA (CON OPCIONES ORIGINALES) ---
 with st.form("formulario_riesgo_nn"):
     st.subheader("📋 Datos del Solicitante")
 
@@ -110,13 +108,16 @@ with st.form("formulario_riesgo_nn"):
 
     st.markdown("---")
 
-    # Definimos las opciones para los campos categóricos tal como aparecen en la UI
+    # Opciones que ve el usuario (ANTES de la transformación de EDA)
     emp_length_options = ['< 1 year', '1 year', '2 years', '3 years', '4 years', '5 years', '6 years', '7 years', '8 years', '9 years', '10+ years']
-    home_ownership_options = ['RENT', 'OWN', 'MORTGAGE', 'OTHER']
-    purpose_options = ['debt_consolidation', 'credit_card', 'home_improvement', 'other', 'major_purchase']
+    home_ownership_options = ['RENT', 'OWN', 'MORTGAGE', 'OTHER', 'ANY', 'NONE']
+    purpose_options = [
+        'debt_consolidation', 'credit_card', 'home_improvement', 'other', 'major_purchase', 'car',
+        'house', 'vacation', 'wedding', 'moving', 'medical', 'educational', 'small_business', 'renewable_energy'
+    ]
     delinq_2yrs_options = ['0', '1', '>=2']
-    inq_last_6mths_options = ['0', '1', '>=2']
-    pub_rec_options = ['0', '1']
+    inq_last_6mths_options = ['0', '1', '>=2'] # Esta no se transforma en la EDA
+    pub_rec_options = ['0', '1', '>=2']
 
     col3, col4 = st.columns(2)
     with col3:
@@ -131,52 +132,86 @@ with st.form("formulario_riesgo_nn"):
 
     enviado = st.form_submit_button("Evaluar Riesgo")
 
-# --- 6. PROCESAMIENTO Y PREDICCIÓN ---
+# --- 6. PROCESAMIENTO Y PREDICCIÓN (CON LÓGICA DE EDA) ---
 if enviado:
-    # ***** INICIO DE LA CORRECCIÓN *****
-    # El script de entrenamiento (`train.py`) usa `pandas.astype('category').cat.categories`,
-    # que ordena alfabéticamente las categorías para asignarles un índice.
-    # Debemos replicar ese mismo comportamiento aquí para ser consistentes.
+    # ***** INICIO DE LA CORRECCIÓN: APLICAR TRANSFORMACIONES DE EDA *****
 
-    # Se crean los mapeos para cada variable categórica usando una lista ORDENADA ALFABÉTICAMENTE.
-    cat_map_corrected = {
-        'emp_length': {val: i for i, val in enumerate(sorted(emp_length_options))},
-        'home_ownership': {val: i for i, val in enumerate(sorted(home_ownership_options))},
-        'purpose': {val: i for i, val in enumerate(sorted(purpose_options))},
-        'delinq_2yrs': {val: i for i, val in enumerate(sorted(delinq_2yrs_options))},
-        'inq_last_6mths': {val: i for i, val in enumerate(sorted(inq_last_6mths_options))},
-        'pub_rec': {val: i for i, val in enumerate(sorted(pub_rec_options))}
+    # 1. Transformar las entradas del usuario según las reglas del notebook
+
+    # -- emp_length --
+    if emp_length in ['5 years', '6 years', '7 years', '8 years', '9 years', '10+ years']:
+        processed_emp_length = '5+ years'
+    else:
+        processed_emp_length = emp_length
+
+    # -- home_ownership --
+    if home_ownership in ['ANY', 'NONE']:
+        processed_home_ownership = 'OTHER'
+    else:
+        processed_home_ownership = home_ownership
+
+    # -- purpose --
+    purpose_mapping_eda = {
+        'debt_consolidation': 'debt_consolidation', 'credit_card': 'credit_related', 'major_purchase': 'credit_related',
+        'car': 'credit_related', 'home_improvement': 'credit_related', 'house': 'credit_related', 'vacation': 'personal_expenses',
+        'wedding': 'personal_expenses', 'moving': 'personal_expenses', 'medical': 'personal_expenses',
+        'educational': 'personal_expenses', 'small_business': 'small_business', 'renewable_energy': 'other', 'other': 'other'
+    }
+    processed_purpose = purpose_mapping_eda.get(purpose, 'other')
+
+    # -- delinq_2yrs --
+    if delinq_2yrs in ['1', '>=2']:
+        processed_delinq_2yrs = '>=1'
+    else:
+        processed_delinq_2yrs = '0'
+
+    # -- pub_rec --
+    if pub_rec in ['1', '>=2']:
+        processed_pub_rec = '>=1'
+    else:
+        processed_pub_rec = '0'
+
+    # -- inq_last_6mths no cambia --
+    processed_inq_last_6mths = inq_last_6mths
+
+    # 2. Crear los mapeos a índices basados en las categorías FINALES (post-EDA), ordenadas alfabéticamente.
+    final_cat_options = {
+        'emp_length': sorted(['< 1 year', '1 year', '2 years', '3 years', '4 years', '5+ years']),
+        'home_ownership': sorted(['RENT', 'OWN', 'MORTGAGE', 'OTHER']),
+        'purpose': sorted(list(set(purpose_mapping_eda.values()))), # Obtener categorías únicas
+        'delinq_2yrs': sorted(['0', '>=1']),
+        'inq_last_6mths': sorted(['0', '1', '>=2']), # Opciones originales
+        'pub_rec': sorted(['0', '>=1'])
     }
 
-    # Usamos el mapeo corregido para convertir el input del usuario al índice correcto.
-    # El orden de las variables aquí DEBE COINCIDIR con el orden de las columnas en el entrenamiento.
-    # Asumimos que este orden es correcto.
+    final_cat_maps = {
+        key: {val: i for i, val in enumerate(options)}
+        for key, options in final_cat_options.items()
+    }
+
+    # 3. Convertir las variables procesadas a sus índices numéricos
     try:
         cat_inputs = [
-            cat_map_corrected['emp_length'][emp_length],
-            cat_map_corrected['home_ownership'][home_ownership],
-            cat_map_corrected['purpose'][purpose],
-            cat_map_corrected['delinq_2yrs'][delinq_2yrs],
-            cat_map_corrected['inq_last_6mths'][inq_last_6mths],
-            cat_map_corrected['pub_rec'][pub_rec]
+            final_cat_maps['emp_length'][processed_emp_length],
+            final_cat_maps['home_ownership'][processed_home_ownership],
+            final_cat_maps['purpose'][processed_purpose],
+            final_cat_maps['delinq_2yrs'][processed_delinq_2yrs],
+            final_cat_maps['inq_last_6mths'][processed_inq_last_6mths],
+            final_cat_maps['pub_rec'][processed_pub_rec]
         ]
         tensor_cat = torch.tensor([cat_inputs], dtype=torch.long)
     except KeyError as e:
-        st.error(f"Error de mapeo: la categoría '{e.args[0]}' no fue encontrada. Revisa las opciones.")
+        st.error(f"Error de mapeo final: la categoría procesada '{e.args[0]}' no se encontró. Revisa la lógica de EDA.")
         st.stop()
 
     # ***** FIN DE LA CORRECCIÓN *****
 
-    # Procesamiento de Variables Numéricas
+    # Procesamiento de Variables Numéricas (se mantiene igual)
     num_inputs_df = pd.DataFrame([[
         loan_amnt, annual_inc, dti, revol_util, total_acc, tot_cur_bal, days_since_earliest_cr
     ]], columns=list(norm_stats['means'].index))
 
     num_inputs_normalized = (num_inputs_df - norm_stats['means']) / norm_stats['stds']
-
-    # NOTA: La siguiente línea inserta una columna de ceros. Esto sugiere que el modelo
-    # fue entrenado con una variable numérica más de las que se piden en el formulario.
-    # Se mantiene por consistencia, pero sería bueno revisarlo.
     num_inputs_final = np.insert(num_inputs_normalized.values, 0, 0, axis=1)
     tensor_num = torch.tensor(num_inputs_final, dtype=torch.float32)
 
@@ -203,7 +238,14 @@ if enviado:
     with st.expander("Ver detalles técnicos de la predicción"):
         st.write(f"**Logit del modelo (salida cruda):** `{logits.item():.4f}`")
         st.write(f"**Probabilidad (Sigmoid):** `{probability:.4f}`")
+        st.write("**Valores categóricos procesados (Post-EDA):**")
+        st.json({
+            "Antigüedad Laboral": processed_emp_length,
+            "Tipo de Vivienda": processed_home_ownership,
+            "Propósito": processed_purpose,
+            "Morosidades": processed_delinq_2yrs,
+            "Solicitudes": processed_inq_last_6mths,
+            "Registros Públicos": processed_pub_rec
+        })
         st.write("**Tensor de entrada categórico (índices):**")
         st.write(tensor_cat)
-        st.write("**Mapeo de antigüedad laboral usado (Alfabético):**")
-        st.json(cat_map_corrected['emp_length'])
