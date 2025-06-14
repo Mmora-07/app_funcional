@@ -78,7 +78,7 @@ def load_model_and_artifacts():
 
 # --- 3. CONFIGURACIÓN DE LA PÁGINA ---
 st.set_page_config(page_title="Evaluador de Riesgo Crediticio NN", page_icon="🤖", layout="centered")
-st.title("🤖 Evaluador de Riesgo Crediticio (Red Neuronal)")
+st.title("🤖 Evaluador de Riesgo Crediticio ")
 st.markdown("Ingrese los datos del solicitante para obtener una predicción de riesgo.")
 st.markdown("---")
 
