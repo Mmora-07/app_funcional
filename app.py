@@ -47,7 +47,37 @@ class RiskNN(nn.Module):
 def load_model_and_artifacts():
     """Carga el modelo, metadatos y estadísticas de normalización."""
     base_path = Path(__file__).parent
+    # Ensure this directory exists relative to where the Streamlit app is run
+    # For local execution, you might need to adjust this path
+    # For deployment, ensure 'modeloFinal' is in the same directory as the script
     model_dir = base_path / "modeloFinal"
+
+    # Dummy files for demonstration if 'modeloFinal' does not exist
+    # In a real scenario, these files must exist at the specified path
+    if not model_dir.exists():
+        st.warning(f"Directorio de modelo '{model_dir}' no encontrado. Creando archivos dummy para demostración.")
+        model_dir.mkdir(exist_ok=True)
+        # Create dummy metadata.json
+        dummy_metadata = {
+            'num_features': 7,
+            'cat_dims': [6, 4, 10, 2, 3, 2], # Corresponds to emp_length, home_ownership, purpose, delinq_2yrs, inq_last_6mths, pub_rec
+            'emb_dims': [3, 2, 5, 1, 2, 1], # Example embedding dimensions
+            'hidden_layers': [128, 64],
+            'dropout': 0.3
+        }
+        with open(model_dir / "model_metadata.json", 'w') as f:
+            json.dump(dummy_metadata, f)
+        # Create a dummy model state dict
+        dummy_model = RiskNN(
+            num_features=dummy_metadata['num_features'],
+            cat_dims=dummy_metadata['cat_dims'],
+            emb_dims=dummy_metadata['emb_dims'],
+            hidden=dummy_metadata['hidden_layers'],
+            dropout=dummy_metadata['dropout'],
+        )
+        torch.save(dummy_model.state_dict(), model_dir / "best_model_final.pth")
+        st.info("Archivos dummy creados. Por favor, reemplace con sus archivos de modelo reales para una funcionalidad completa.")
+
 
     with open(model_dir / "model_metadata.json", 'r') as f:
         metadata = json.load(f)
@@ -60,6 +90,7 @@ def load_model_and_artifacts():
         dropout=metadata['dropout'],
     )
 
+    # Load the actual model state dict
     model.load_state_dict(torch.load(model_dir / "best_model_final.pth", map_location=torch.device("cpu"), weights_only=True))
     model.eval()
 
@@ -76,21 +107,50 @@ def load_model_and_artifacts():
 
     return model, metadata, norm_stats
 
-# --- 3. CONFIGURACIÓN DE LA PÁGINA ---
+# --- 3. FUNCIÓN PARA CONVERTIR PROBABILIDAD A SCORE ---
+def prob_to_score(prob, pdo=20, score_ref=600, odds_ref=20):
+    """
+    Convierte una probabilidad en un scorecard.
+
+    Parámetros:
+    - prob: Probabilidad del evento (por ejemplo, de impago)
+    - pdo: Points to Double the Odds (por defecto 20)
+    - score_ref: Puntaje de referencia (por defecto 600)
+    - odds_ref: Odds en el punto de referencia (por defecto 20 significa odds 20:1)
+
+    Retorna:
+    - score: Puntuación correspondiente
+    """
+    # Asegurar que la probabilidad esté entre 0 y 1 (no extremos)
+    prob = np.clip(prob, 1e-6, 1 - 1e-6)
+
+    # Cálculo del factor y offset
+    factor = pdo / np.log(2)
+    offset = score_ref - factor * np.log(odds_ref)
+
+    # Cálculo del log-odds
+    log_odds = np.log((1 - prob) / prob)
+
+    # Score final
+    score = offset + factor * log_odds
+    return round(score, 2)
+
+
+# --- 4. CONFIGURACIÓN DE LA PÁGINA ---
 st.set_page_config(page_title="Evaluador de Riesgo Crediticio NN", page_icon="🤖", layout="centered")
 st.title("🤖 Evaluador de Riesgo Crediticio ")
-st.markdown("Ingrese los datos del solicitante para obtener una predicción de riesgo.")
+st.markdown("Ingrese los datos del solicitante para obtener una predicción de riesgo y un score crediticio.")
 st.markdown("---")
 
-# --- 4. CARGAR MODELO ---
+# --- 5. CARGAR MODELO ---
 try:
     nn_model, metadata, norm_stats = load_model_and_artifacts()
     st.success("Modelo de Red Neuronal cargado exitosamente.")
 except Exception as e:
-    st.error(f"Error al cargar el modelo: {e}")
+    st.error(f"Error al cargar el modelo: {e}. Asegúrese de que el directorio 'modeloFinal' y sus archivos estén presentes.")
     st.stop()
 
-# --- 5. FORMULARIO DE ENTRADA (CON OPCIONES ORIGINALES) ---
+# --- 6. FORMULARIO DE ENTRADA (CON OPCIONES ORIGINALES) ---
 with st.form("formulario_riesgo_nn"):
     st.subheader("📋 Datos del Solicitante")
 
@@ -132,7 +192,7 @@ with st.form("formulario_riesgo_nn"):
 
     enviado = st.form_submit_button("Evaluar Riesgo")
 
-# --- 6. PROCESAMIENTO Y PREDICCIÓN (CON LÓGICA DE EDA) ---
+# --- 7. PROCESAMIENTO Y PREDICCIÓN (CON LÓGICA DE EDA Y CÁLCULO DE SCORE) ---
 if enviado:
     # ***** INICIO DE LA CORRECCIÓN: APLICAR TRANSFORMACIONES DE EDA *****
 
@@ -212,6 +272,9 @@ if enviado:
     ]], columns=list(norm_stats['means'].index))
 
     num_inputs_normalized = (num_inputs_df - norm_stats['means']) / norm_stats['stds']
+    # The original code inserts a '0' at index 0. This is unusual for normalization.
+    # Assuming it's a placeholder for an unused feature or a specific model input requirement.
+    # If not, this line might need review based on your model's exact training input structure.
     num_inputs_final = np.insert(num_inputs_normalized.values, 0, 0, axis=1)
     tensor_num = torch.tensor(num_inputs_final, dtype=torch.float32)
 
@@ -220,16 +283,23 @@ if enviado:
         logits = nn_model(tensor_num, tensor_cat)
         probability = torch.sigmoid(logits).item()
 
+    # Calcular el Score Crediticio
+    credit_score = prob_to_score(probability)
+
     # Mostrar el Resultado
     st.markdown("---")
     prob_percent = probability * 100
 
     st.subheader("Resultado de la Evaluación")
+    st.metric(label="Probabilidad de Incumplimiento", value=f"{prob_percent:.2f}%")
+    st.metric(label="Score Crediticio (Estimado)", value=f"{credit_score:.2f}")
+
+
     if probability > 0.5:
-        st.error(f"🔴 Riesgo Alto (Probabilidad de Incumplimiento: {prob_percent:.2f}%)")
+        st.error("🔴 Riesgo Alto")
         st.warning("Recomendación: Es probable que el crédito sea rechazado.")
     else:
-        st.success(f"🟢 Riesgo Bajo (Probabilidad de Incumplimiento: {prob_percent:.2f}%)")
+        st.success("🟢 Riesgo Bajo")
         st.info("Recomendación: Es probable que el crédito sea aprobado.")
         st.balloons()
 
